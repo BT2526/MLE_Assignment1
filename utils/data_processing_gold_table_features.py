@@ -125,12 +125,14 @@ def encode_occupation(df):
         F.when(F.col('Occupation').isin(valid_occupations), F.col('Occupation'))
          .otherwise('unknown')
     )
-    # One-hot encode
-    for occ in valid_occupations:
-        df = df.withColumn(
-            f'occ_{occ}',
-            F.when(F.col('Occupation') == occ, 1).otherwise(0).cast(IntegerType())
-        )
+    # Label encode (alphabetical index)
+    all_vals = sorted(valid_occupations + ['unknown'])
+    mapping = {v: i for i, v in enumerate(all_vals)}
+    df = df.withColumn('Occupation_encoded',
+        F.create_map(*[x for k, v in mapping.items() 
+                       for x in (F.lit(k), F.lit(v))])[F.col('Occupation')]
+        .cast(IntegerType())
+    )
     return df
 
 # Feature engineering with new features that capture credit risk signals more directly
