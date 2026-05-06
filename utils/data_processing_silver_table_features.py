@@ -152,7 +152,7 @@ def clean_payment_behaviour(df):
         "high_spent_medium_value_payments",
         "high_spent_large_value_payments"
     ]
-    # Normalization: Remove whitespace and lowercase the strings to match the list (valid behaviours) above
+    # Remove whitespace and lowercase the strings to match the list (valid behaviours) above
     df = df.withColumn("Payment_Behaviour", F.trim(F.lower(F.col("Payment_Behaviour"))))
     # Keep only the valid behaviours
     df = df.withColumn("Payment_Behaviour", F.when(
