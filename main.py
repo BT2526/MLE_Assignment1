@@ -38,7 +38,8 @@ gold_label_store_directory = "datamart/gold/label_store/"
 
 bronze_features_directory = "datamart/bronze/features/"
 silver_features_directory = "datamart/silver/features/"
-gold_features_directory = "datamart/gold/features/"
+gold_features_directory = "datamart/gold/features/baseline"
+gold_features_directory_full = "datamart/gold/features/full"
 
 os.makedirs(bronze_lms_directory, exist_ok=True)
 os.makedirs(silver_loan_daily_directory, exist_ok=True)
@@ -47,6 +48,7 @@ os.makedirs(gold_label_store_directory, exist_ok=True)
 os.makedirs(bronze_features_directory, exist_ok=True)
 os.makedirs(silver_features_directory, exist_ok=True)
 os.makedirs(gold_features_directory, exist_ok=True)
+os.makedirs(gold_features_directory_full, exist_ok=True)
 
 # Generate list of dates to process
 def generate_first_of_month_dates(start_date_str, end_date_str):
@@ -90,20 +92,25 @@ for date_str in dates_str_lst:
 # Build Gold Tables & Run Gold Backfill
 for date_str in dates_str_lst:
     utils.data_processing_gold_table.process_labels_gold_table(date_str, silver_loan_daily_directory, gold_label_store_directory, spark, dpd = 30, mob = 6)
-    utils.data_processing_gold_table_features.process_gold_features_table(date_str, silver_features_directory, gold_features_directory, spark)
+    utils.data_processing_gold_table_features.process_gold_features_table(date_str, silver_features_directory, gold_features_directory, gold_features_directory_full, spark)
 
 # Inspect Label Store
 folder_path = gold_label_store_directory
-files_list = [folder_path+os.path.basename(f) for f in glob.glob(os.path.join(folder_path, '*'))]
+files_list = [os.path.join(folder_path, os.path.basename(f)) for f in glob.glob(os.path.join(folder_path, '*'))]
 df = spark.read.option("header", "true").parquet(*files_list)
-print("row_count:",df.count())
-
+print("row_count:", df.count())
 df.show()
 
-# Inspect Feature Store
+# Inspect Feature Store — Baseline (all 24 snapshots, financials + attributes)
 folder_path = gold_features_directory
-files_list = [folder_path+os.path.basename(f) for f in glob.glob(os.path.join(folder_path, '*'))]
-df = spark.read.option("header", "true").parquet(*files_list)
-print("row_count:",df.count())
+files_list = [os.path.join(folder_path, os.path.basename(f)) for f in glob.glob(os.path.join(folder_path, '*'))]
+df_baseline = spark.read.option("header", "true").parquet(*files_list)
+print("baseline row_count:", df_baseline.count())
+df_baseline.show()
 
-df.show()
+# Inspect Feature Store — Full (18 snapshots, includes fe_1 to fe_20)
+folder_path = gold_features_directory_full
+files_list = [os.path.join(folder_path, os.path.basename(f)) for f in glob.glob(os.path.join(folder_path, '*'))]
+df_full = spark.read.option("header", "true").parquet(*files_list)
+print("full row_count:", df_full.count())
+df_full.show()
