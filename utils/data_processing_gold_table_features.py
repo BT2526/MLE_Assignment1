@@ -14,6 +14,28 @@ import argparse
 from pyspark.sql.functions import col
 from pyspark.sql.types import StringType, IntegerType, FloatType, DateType, DoubleType
 
+# Define valid snapshots from clickstream data
+clickstream_valid_snapshots = {
+    '2023-01-01',
+    '2023-02-01', 
+    '2023-03-01', 
+    '2023-04-01', 
+    '2023-05-01',
+    '2023-06-01', 
+    '2023-07-01', 
+    '2023-08-01',
+    '2023-09-01',
+    '2023-10-01',
+    '2023-11-01',
+    '2023-12-01',
+    '2024-01-01',
+    '2024-02-01',
+    '2024-03-01',
+    '2024-04-01',
+    '2024-05-01',
+    '2024-06-01'
+}
+
 # Pad fe_ cols with null for customers with no clickstream match
 def pad_features(df):
     """Add fe_1 to fe_20 as null DoubleType if not present (customers with no clickstream match)."""
@@ -25,7 +47,35 @@ def pad_features(df):
             df = df.withColumn(col_name, F.col(col_name).cast(DoubleType()))
     return df
 
-# Clamp outliers to [1st, 99th] percentile bounds. Values outside of [1st, 99th] percentile will be set to 1st and 99th percentile values respectively.
+# Negative value fix
+def fix_negative_values(df):
+    """
+    Replace nonsensical negative values with null.
+    These columns have no valid negative interpretation.
+    """
+    # Counts — can never be negative
+    count_cols = ['Num_of_Loan', 'Num_of_Delayed_Payment', 'Num_Bank_Accounts',
+                  'Num_Credit_Card', 'Interest_Rate', 'Num_Credit_Inquiries',
+                  'Delay_from_due_date', 'Credit_History_Age']
+    for c in count_cols:
+        if c in df.columns:
+            df = df.withColumn(c,
+                F.when(F.col(c) < 0, F.lit(None).cast(DoubleType()))
+                 .otherwise(F.col(c))
+            )
+
+    # Negative values in Changed_Credit_Limit is valid as it represents limit was lowered
+    # Extreme negatives like -100 are assessed to be data errors, hence null out below -50
+    if 'Changed_Credit_Limit' in df.columns:
+        df = df.withColumn('Changed_Credit_Limit',
+            F.when(F.col('Changed_Credit_Limit') < -50, F.lit(None).cast(DoubleType()))
+             .otherwise(F.col('Changed_Credit_Limit'))
+        )
+
+    return df   
+
+# Clamp outliers to [1st, 99th] percentile bounds. 
+# Values outside of [1st, 99th] percentile will be set to 1st and 99th percentile values respectively.
 def clamp_outliers(df):
     clamp_cols = [
         'Annual_Income',
@@ -196,34 +246,44 @@ def drop_columns(df):
     existing = [c for c in cols_to_drop if c in df.columns]
     return df.drop(*existing)
 
-def fix_negative_values(df):
+def common_processing(df, snapshot_date_str):
     """
-    Replace nonsensical negative values with null.
-    These columns have no valid negative interpretation.
+    Apply all processing steps common to both gold tables:
+    negative value fix, outlier clamping, encoding, feature engineering,
+    column pruning, and adding snapshot_date back.
     """
-    # Counts — can never be negative
-    count_cols = ['Num_of_Loan', 'Num_of_Delayed_Payment', 'Num_Bank_Accounts',
-                  'Num_Credit_Card', 'Interest_Rate', 'Num_Credit_Inquiries',
-                  'Delay_from_due_date', 'Credit_History_Age']
-    for c in count_cols:
-        if c in df.columns:
-            df = df.withColumn(c,
-                F.when(F.col(c) < 0, F.lit(None).cast(DoubleType()))
-                 .otherwise(F.col(c))
-            )
-
-    # Negative values in Changed_Credit_Limit is valid as it represents limit was lowered
-    # Extreme negatives like -100 are assessed to be data errors, hence null out below -50
-    if 'Changed_Credit_Limit' in df.columns:
-        df = df.withColumn('Changed_Credit_Limit',
-            F.when(F.col('Changed_Credit_Limit') < -50, F.lit(None).cast(DoubleType()))
-             .otherwise(F.col('Changed_Credit_Limit'))
-        )
-
-    return df   
-
-def process_gold_features_table(snapshot_date_str, silver_features_directory, gold_features_directory, spark):
+    # Fix negative values
+    print(f"[{snapshot_date_str}] fixing negative values...")
+    df = fix_negative_values(df)
+    
+    # Clamp outliers
+    print(f"[{snapshot_date_str}] clamping outliers...")
+    df = clamp_outliers(df)
  
+    # Encode categorical columns
+    print(f"[{snapshot_date_str}] encoding categorical columns...")
+    df = encode_credit_mix(df)
+    df = encode_payment_of_min_amount(df)
+    df = encode_payment_behaviour(df)
+    df = encode_occupation(df)
+    
+    # Feature engineering
+    print(f"[{snapshot_date_str}] engineering features...")
+    df = engineer_features(df)
+ 
+    # Drop columns
+    df = drop_columns(df)
+
+    # Add snapshot_date column
+    df = df.withColumn('snapshot_date', F.lit(snapshot_date_str))
+ 
+    return df
+
+def process_gold_features_table(snapshot_date_str, silver_features_directory, gold_features_directory, gold_features_directory_full, spark):
+    """
+    gold_features_directory: Gold Table 1 - financials + attributes only (all snapshots)
+    gold_features_directory_full: Gold Table 2 - financials + attributes + clickstream (valid snapshots only)
+    """ 
     # Prepare arguments
     snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
  
@@ -239,48 +299,55 @@ def process_gold_features_table(snapshot_date_str, silver_features_directory, go
  
     print(f"[{snapshot_date_str}] loaded | financials: {df_financials.count()} | attributes: {df_attributes.count()} | clickstream: {df_clickstream.count()}")
  
-    # Join tables
-    df_gold = df_financials.drop('snapshot_date') \
-                .join(df_attributes.drop('snapshot_date'), on='Customer_ID', how='left') \
-                .join(df_clickstream.drop('snapshot_date'), on='Customer_ID', how='left')
- 
-    # Pad fe_ cols with null for customers with no clickstream match
-    df_gold = pad_features(df_gold)
- 
-    # Log clickstream match rate
-    total   = df_gold.count()
-    matched = df_gold.filter(F.col('fe_1').isNotNull()).count()
-    print(f"[{snapshot_date_str}] after join: {total} rows | clickstream matched: {matched} ({matched/total*100:.1f}%) | unmatched: {total - matched}")
- 
-    # Fix negative values
-    print(f"[{snapshot_date_str}] fixing negative values...")
-    df_gold = fix_negative_values(df_gold)
+    # Base dataframe (financials + attributes only)
+    df_base = df_financials.drop('snapshot_date') \
+                .join(df_attributes.drop('snapshot_date'), on='Customer_ID', how='left')
 
-    # Clamp outliers
-    print(f"[{snapshot_date_str}] clamping outliers...")
-    df_gold = clamp_outliers(df_gold)
+    # Gold Table 1
+    print(f"\n[{snapshot_date_str}] --- Building Gold Table 1: Baseline ---")
+    df_baseline = common_processing(df_base, snapshot_date_str)
  
-    # Encode categorical columns
-    print(f"[{snapshot_date_str}] encoding categorical columns...")
-    df_gold = encode_credit_mix(df_gold)
-    df_gold = encode_payment_of_min_amount(df_gold)
-    df_gold = encode_payment_behaviour(df_gold)
-    df_gold = encode_occupation(df_gold)
+    filepath_baseline = os.path.join(
+        gold_features_directory,
+        f"gold_features_baseline_{date_suffix}.parquet"
+    )
+    df_baseline.write.mode("overwrite").parquet(filepath_baseline)
+    print(f"[{snapshot_date_str}] Gold Table 1 saved: {filepath_baseline} | columns: {len(df_baseline.columns)}")
  
-    # Feature engineering
-    print(f"[{snapshot_date_str}] engineering features...")
-    df_gold = engineer_features(df_gold)
+    # Gold Table 2
+    df_full = None
+
+    print(f"\n[{snapshot_date_str}] --- Building Gold Table 2: With Clickstream ---")
+    
+    if snapshot_date_str in clickstream_valid_snapshots:
+        print(f"\n[{snapshot_date_str}] --- Building Gold Table 2: Full (clickstream available) ---")
  
-    # Drop raw columns replaced by engineered/encoded versions
-    df_gold = drop_columns(df_gold)
+        path_click = os.path.join(silver_features_directory, f"silver_features_clickstream_{date_suffix}.parquet")
+        df_clickstream = spark.read.parquet(path_click)
+        print(f"[{snapshot_date_str}] clickstream: {df_clickstream.count()} rows")
  
-    # Add snapshot_date back
-    df_gold = df_gold.withColumn('snapshot_date', F.lit(snapshot_date_str))
+        df_full = df_base.join(df_clickstream.drop('snapshot_date'), on='Customer_ID', how='left')
  
-    # Save
-    partition_name = f"gold_features_{date_suffix}.parquet"
-    filepath = os.path.join(gold_features_directory, partition_name)
-    df_gold.write.mode("overwrite").parquet(filepath)
-    print(f"[{snapshot_date_str}] saved to: {filepath} | final columns: {len(df_gold.columns)}")
+        # Verify overlap before proceeding
+        total   = df_full.count()
+        matched = df_full.filter(F.col('fe_1').isNotNull()).count()
+        match_pct = matched / total * 100 if total > 0 else 0
+        print(f"[{snapshot_date_str}] clickstream match: {matched}/{total} ({match_pct:.1f}%)")
  
-    return df_gold
+        if match_pct < 80:
+            print(f"[{snapshot_date_str}] WARNING: clickstream overlap below 80% — check source data")
+ 
+        df_full = pad_features(df_full)
+        df_full = common_processing(df_full, snapshot_date_str)
+ 
+        filepath_full = os.path.join(
+            gold_features_directory_full,
+            f"gold_features_full_{date_suffix}.parquet"
+        )
+        df_full.write.mode("overwrite").parquet(filepath_full)
+        print(f"[{snapshot_date_str}] Gold Table 2 saved: {filepath_full} | columns: {len(df_full.columns)}")
+ 
+    else:
+        print(f"\n[{snapshot_date_str}] Skipping Gold Table 2 — snapshot outside clickstream valid range")
+ 
+    return df_baseline, df_full
