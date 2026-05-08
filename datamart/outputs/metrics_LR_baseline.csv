@@ -1,0 +1,3 @@
+label,accuracy,roc_auc,feature_set,train_end,run_ts
+LR_baseline_train,0.7276,0.7575,baseline,2024-06-01,2026-05-08 20:46:44
+LR_baseline_test,0.7231,0.7517,baseline,2024-06-01,2026-05-08 20:46:44
