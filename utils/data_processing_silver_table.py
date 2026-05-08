@@ -44,6 +44,9 @@ def process_silver_table(snapshot_date_str, bronze_lms_directory, silver_loan_da
     for column, new_type in column_type_map.items():
         df = df.withColumn(column, col(column).cast(new_type))
 
+    # lowercase Customer_ID
+    df = df.withColumn('Customer_ID', F.trim(F.lower(F.col('Customer_ID').cast("string"))))
+
     # augment data: add month on book
     df = df.withColumn("mob", col("installment_num").cast(IntegerType()))
 
